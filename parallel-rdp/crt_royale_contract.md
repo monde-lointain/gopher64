@@ -67,7 +67,10 @@ Per pass, descriptor set 0:
 - bindings 1..N: `sampler2D` inputs, in the order listed in the pass's
   `InputBinding[]` table in `crt_royale.cpp`.
 
-`Params` carries only the size/frame uniforms a pass actually reads:
+Every pass declares the **full canonical block, verbatim, in this order** — the
+C++ side always uploads the fixed 64-byte std140 block, so a pass that omits or
+reorders a field desyncs its offsets (e.g. reading `OriginalSize` bytes as
+`FrameCount`). Unused fields are harmless; declare them anyway.
 
 ```glsl
 layout(std140, set = 0, binding = 0) uniform Params {
@@ -78,8 +81,8 @@ layout(std140, set = 0, binding = 0) uniform Params {
 } params;
 ```
 
-Unused fields may be omitted per pass as long as the C++ side fills what the
-shader declares. No `global`/MVP UBO (the fullscreen triangle needs no matrix).
+No `global`/MVP UBO (the fullscreen triangle needs no matrix). C++ side:
+`PassUniforms` in crt_royale.cpp has `static_assert(sizeof == 64)`.
 
 ## Gamma contract
 

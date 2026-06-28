@@ -19,11 +19,13 @@
 #include "scanline-functions.inc"
 
 //  set=0/binding=0 Params UBO, bound to BOTH stages (crt_royale_contract.md).
-//  Pass 1 reads SourceSize here; FrameCount is declared to keep the block layout
-//  identical to the fragment stage that consumes it for the interlace bob.
+//  Declare the full canonical block so std140 offsets match the C++ upload and
+//  the fragment stage; this stage only reads SourceSize.
 layout(std140, set = 0, binding = 0) uniform Params
 {
     vec4 SourceSize;
+    vec4 OriginalSize;
+    vec4 OutputSize;
     uint FrameCount;
 } params;
 

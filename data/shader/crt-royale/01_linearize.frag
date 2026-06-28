@@ -19,10 +19,14 @@
 #include "gamma.inc"
 
 //  set=0/binding=0 Params UBO, bound to BOTH stages (crt_royale_contract.md).
-//  Pass 1 reads SourceSize (texel size) and FrameCount (interlace bob).
+//  Every pass declares the full canonical block so its std140 offsets match the
+//  fixed 64-byte block the C++ side uploads; this pass reads SourceSize and
+//  FrameCount (interlace bob) and ignores the rest.
 layout(std140, set = 0, binding = 0) uniform Params
 {
     vec4 SourceSize;
+    vec4 OriginalSize;
+    vec4 OutputSize;
     uint FrameCount;
 } params;
 
