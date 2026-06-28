@@ -1,5 +1,6 @@
 #include "interface.hpp"
 #include "../retroachievements/retroachievements.h"
+#include "crt_royale.hpp"
 #include "rdp_device.hpp"
 #include "spirv.hpp"
 #include "spirv_crt.hpp"
@@ -108,6 +109,13 @@ static CALL_BACK callback;
 static GFX_INFO gfx_info;
 static const uint32_t *fragment_spirv;
 static size_t fragment_size;
+
+// crt-royale multi-pass pipeline. One instance per session, owned here so the
+// new state stays out of the legacy globals. Built in rdp_init after the Vulkan
+// device exists and reset in rdp_close before the device is destroyed.
+static std::unique_ptr<crt_royale::CrtRoyalePipeline> crt_pipeline;
+// Per-frame counter for the royale interlace passes; bumped only on CRT frames.
+static uint32_t crt_frame_count = 0;
 
 static std::vector<bool> rdram_dirty;
 static uint64_t sync_signal;
@@ -431,6 +439,18 @@ void rdp_init(void *_window, GFX_INFO _gfx_info, const void *font,
 
   wsi->begin_frame();
 
+  // CRT (royale): build the multi-pass pipeline now that the Vulkan device
+  // exists (after wsi init) -- not in the gfx_info.crt fragment_spirv branch
+  // above, which runs before the device is created. The constructor loads the
+  // embedded textures and builds the per-pass programs via the device. Reset in
+  // rdp_close before the device is destroyed.
+  if (gfx_info.crt) {
+    crt_pipeline =
+        std::make_unique<crt_royale::CrtRoyalePipeline>(wsi->get_device());
+  } else {
+    crt_pipeline.reset();
+  }
+
   callback.emu_running = true;
   callback.enable_speedlimiter = true;
   callback.paused = false;
@@ -458,6 +478,11 @@ void rdp_close() {
   achievement_challenge_indicator_image = Vulkan::ImageHandle();
   achievement_progress_indicator_image = Vulkan::ImageHandle();
   fps_image = Vulkan::ImageHandle();
+
+  // Free the CRT pipeline's Vulkan resources while the device is still alive
+  // (the device is destroyed by `delete wsi` below). Never rely on static
+  // destruction order, which would run after the device is gone.
+  crt_pipeline.reset();
 
   if (wsi)
     wsi->end_frame();
@@ -566,6 +591,13 @@ static void render_frame(Vulkan::Device &device) {
   options.persist_frame_on_invalid_input = true;
   options.blend_previous_frame = !gfx_info.ssaa;
   options.upscale_deinterlacing = gfx_info.ssaa;
+  if (gfx_info.crt) {
+    // crt-royale does its own interlace bob and 240p handling, so disable
+    // parallel-rdp's deinterlace/blend; the first royale pass must receive raw
+    // fields (avoids double-deinterlacing 480i and unwanted 240p blending).
+    options.blend_previous_frame = false;
+    options.upscale_deinterlacing = false;
+  }
   if (gfx_info.ssaa) {
     switch (gfx_info.upscale) {
     case 2:
@@ -610,12 +642,36 @@ static void render_frame(Vulkan::Device &device) {
 
   // Blit image on screen.
   auto cmd = device.request_command_buffer();
+
+  // CRT (royale): run the 10 offscreen passes before the swapchain render pass
+  // (run_offscreen requires no active render pass). The "viewport" fed to the
+  // chain MUST be the calculate_viewport rect (the displayed image), not the
+  // swapchain extent, so the viewport-scaled passes match what is shown. The
+  // returned view is the source for the final geometry/AA pass drawn below.
+  const Vulkan::ImageView *crt_final_source = nullptr;
+  crt_royale::Extent crt_source_size = {};
+  crt_royale::Extent crt_viewport_size = {};
+  if (gfx_info.crt && crt_pipeline && image) {
+    ++crt_frame_count;
+    float vp_x, vp_y, vp_width, vp_height;
+    calculate_viewport(&vp_x, &vp_y, &vp_width, &vp_height,
+                       image->get_height() / gfx_info.upscale);
+    crt_source_size = {image->get_width(), image->get_height()};
+    crt_viewport_size = {static_cast<uint32_t>(vp_width),
+                         static_cast<uint32_t>(vp_height)};
+    crt_final_source = &crt_pipeline->run_offscreen(
+        *cmd, image->get_view(), crt_source_size, crt_viewport_size,
+        crt_frame_count);
+  }
   {
     auto rp = device.get_swapchain_render_pass(
         Vulkan::SwapchainRenderPass::ColorOnly);
     cmd->begin_render_pass(rp);
 
-    cmd->set_program(program);
+    if (gfx_info.crt && crt_pipeline)
+      cmd->set_program(crt_pipeline->final_pass_program());
+    else
+      cmd->set_program(program);
 
     // Basic default render state.
     cmd->set_opaque_state();
@@ -629,23 +685,29 @@ static void render_frame(Vulkan::Device &device) {
       calculate_viewport(&vp.x, &vp.y, &vp.width, &vp.height,
                          image->get_height() / gfx_info.upscale);
 
-      if (gfx_info.crt) {
-        // Set shader parameters
-        Push push = {
-            {float(image->get_width()), float(image->get_height()),
-             1.0f / float(image->get_width()),
-             1.0f / float(image->get_height())},
-            {vp.width, vp.height, 1.0f / vp.width, 1.0f / vp.height},
-        };
-        cmd->push_constants(&push, 0, sizeof(push));
+      if (gfx_info.crt && crt_pipeline && crt_final_source) {
+        // Final royale geometry/AA pass into the swapchain. The swapchain is a
+        // non-sRGB (UNORM) backbuffer -- wsi->set_backbuffer_srgb(false) in
+        // rdp_init -- so the final pass's manual gamma encode is not doubled.
+        // Binding model (set 0): binding 0 = size/frame UBO (filled by
+        // push_final_pass_uniforms); binding 1 = source (pass 9 output,
+        // mipmapped -> TrilinearClamp).
+        crt_pipeline->push_final_pass_uniforms(*cmd, crt_source_size,
+                                               crt_viewport_size,
+                                               crt_frame_count);
+        cmd->set_texture(0, 1, *crt_final_source,
+                         Vulkan::StockSampler::TrilinearClamp);
+        cmd->set_viewport(vp);
+        // Draws fullscreen quad using oversized triangle.
+        cmd->draw(3);
+      } else {
+        cmd->set_texture(0, 0, image->get_view(),
+                         Vulkan::StockSampler::NearestClamp);
+        cmd->set_viewport(vp);
+        // The vertices are constants in the shader.
+        // Draws fullscreen quad using oversized triangle.
+        cmd->draw(3);
       }
-
-      cmd->set_texture(0, 0, image->get_view(),
-                       Vulkan::StockSampler::NearestClamp);
-      cmd->set_viewport(vp);
-      // The vertices are constants in the shader.
-      // Draws fullscreen quad using oversized triangle.
-      cmd->draw(3);
     }
     if (!messages.empty()) {
       Message *message = &messages.front();
