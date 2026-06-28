@@ -24,6 +24,7 @@ OUT="$HERE/../../../parallel-rdp/spirv_crt_royale.hpp"
 # translated; idx 10 (geometry) is the final pass drawn to the swapchain.
 PASSES=(
     "00 lut"
+    "01 linearize"
 )
 
 emit_stage() {  # $1 = array symbol, $2 = source path
