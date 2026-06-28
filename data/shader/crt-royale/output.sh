@@ -25,6 +25,15 @@ OUT="$HERE/../../../parallel-rdp/spirv_crt_royale.hpp"
 PASSES=(
     "00 lut"
     "01 linearize"
+    "02 scanlines_vert"
+    "03 bloom_approx"
+    "04 blur_vert"
+    "05 halation"
+    "06 masked_scanlines"
+    "07 brightpass"
+    "08 bloom_vert"
+    "09 bloom_reconstitute"
+    "10 geometry"
 )
 
 emit_stage() {  # $1 = array symbol, $2 = source path
