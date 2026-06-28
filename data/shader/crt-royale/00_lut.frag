@@ -9,8 +9,21 @@
 layout(location = 0) in vec2 vTexCoord;
 layout(location = 0) out vec4 FragColor;
 
-layout(set = 0, binding = 0) uniform sampler2D Source;
-layout(set = 0, binding = 1) uniform sampler2D SamplerLUT;
+// set=0/binding=0 Params UBO (canonical block, per crt_royale_contract.md). The
+// LUT pass reads no size uniforms, but declares the block so its sampler bindings
+// align with the pipeline's UBO@0 + inputs@1..N model used by every other pass.
+// Without this, the C++ side bound the scanout/LUT one slot too low and the LUT
+// pass sampled the wrong textures (black screen).
+layout(std140, set = 0, binding = 0) uniform Params
+{
+    vec4 SourceSize;
+    vec4 OriginalSize;
+    vec4 OutputSize;
+    uint FrameCount;
+} params;
+
+layout(set = 0, binding = 1) uniform sampler2D Source;      // raw RDP scanout
+layout(set = 0, binding = 2) uniform sampler2D SamplerLUT;  // NEC XM29 color LUT
 
 // Guard against undefined values some GPUs introduce; keeps the blue lerp safe.
 vec4 mixfix(vec4 a, vec4 b, float c) {
