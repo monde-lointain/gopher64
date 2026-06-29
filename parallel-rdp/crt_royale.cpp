@@ -32,6 +32,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 
 namespace crt_royale {
 namespace {
@@ -59,13 +60,16 @@ constexpr int kFinalPassIndex = kOffscreenPassCount;     // 10
 constexpr int kProgramCount = kOffscreenPassCount + 1;   // 11
 constexpr int kLastOffscreenPass = kOffscreenPassCount - 1; // 9
 
-// Dev-only per-pass visualizer: define CRT_ROYALE_DEBUG_PASS to 0..9 to make
+// Dev-only per-pass visualizer: set env CRT_ROYALE_DEBUG_PASS=0..9 to make
 // run_offscreen() return that pass's output instead of the last pass, so a wrong
-// pass can be bisected on screen. -1 (default) disables it.
-#ifndef CRT_ROYALE_DEBUG_PASS
-#define CRT_ROYALE_DEBUG_PASS (-1)
-#endif
-constexpr int kDebugVisualizePass = CRT_ROYALE_DEBUG_PASS;
+// pass can be bisected on screen. Unset/-1 disables it. Read once (cached).
+int debug_visualize_pass() {
+    static const int pass = [] {
+        const char *env = std::getenv("CRT_ROYALE_DEBUG_PASS");
+        return env ? std::atoi(env) : -1;
+    }();
+    return pass;
+}
 
 // ---------------------------------------------------------------------------
 // Pass-input description (table-driven; no 11-way branch).
@@ -317,12 +321,32 @@ CrtRoyalePipeline::Impl::Impl(Vulkan::Device &device_) : device(device_) {
                                      royale_slot_mask_large_width,
                                      royale_slot_mask_large_height, /*mipmapped=*/true);
 
-    // Prefer SPIR-V-reflected ResourceLayouts (null layouts) so the ~22 binding
-    // masks are not hand-maintained; the shaders declare the UBO in both stages.
+    // This Granite build does NOT reflect a ResourceLayout from the SPIR-V when
+    // none is passed -- it builds an empty layout, so the descriptors are never
+    // bound and every draw is a no-op (black screen). Hand-build the layout per
+    // pass instead: a UBO at binding 0 (read by both stages) plus the sampled
+    // inputs at bindings 1..N. Declaring a binding the (DCE'd) SPIR-V doesn't use
+    // is harmless; declaring too few is what fails validation.
     for (int pass = 0; pass < kProgramCount; ++pass) {
         const PassDesc &desc = kPasses[pass];
+        // The final (geometry) pass samples one caller-bound input at binding 1;
+        // offscreen passes sample input_count inputs at bindings 1..N.
+        const unsigned sampler_count =
+            (pass == kFinalPassIndex) ? 1u : static_cast<unsigned>(desc.input_count);
+
+        Vulkan::ResourceLayout vertex_layout = {};
+        Vulkan::ResourceLayout fragment_layout = {};
+        vertex_layout.sets[kDescriptorSet].uniform_buffer_mask = 1u << kUniformBinding;
+        fragment_layout.sets[kDescriptorSet].uniform_buffer_mask = 1u << kUniformBinding;
+        for (unsigned i = 0; i < sampler_count; ++i) {
+            fragment_layout.sets[kDescriptorSet].sampled_image_mask |=
+                1u << (kFirstInputBinding + i);
+        }
+        fragment_layout.output_mask = 1u << 0;
+
         programs[pass] = device.request_program(desc.vert_spirv, desc.vert_size,
-                                                 desc.frag_spirv, desc.frag_size);
+                                                 desc.frag_spirv, desc.frag_size,
+                                                 &vertex_layout, &fragment_layout);
     }
 }
 
@@ -380,9 +404,21 @@ void CrtRoyalePipeline::Impl::run_pass(Vulkan::CommandBuffer &cmd, int pass,
     const PassDesc &desc = kPasses[pass];
     const Extent output_size = sizes[pass];
 
+    // Transition the FBO to the attachment layout before rendering. After the
+    // previous frame it is in SHADER_READ_ONLY (later passes / the final pass
+    // sampled it), but the render pass needs COLOR_ATTACHMENT_OPTIMAL. Use
+    // UNDEFINED as the old layout: it is valid from any state and discards the
+    // stale contents, which is fine because the fullscreen triangle overwrites
+    // every texel. Without this the layouts desync (validation error; black).
+    cmd.image_barrier(*framebuffers[pass], VK_IMAGE_LAYOUT_UNDEFINED,
+                      VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                      VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+                      VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
+                      VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                      VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
+
     // Render into this pass's FBO. load/clear are left off (DONT_CARE): the
-    // fullscreen triangle overwrites every texel, and discarding the previous
-    // contents lets the cross-frame SHADER_READ_ONLY -> attachment reuse be free.
+    // fullscreen triangle overwrites every texel.
     Vulkan::RenderPassInfo render_pass = {};
     render_pass.num_color_attachments = 1;
     render_pass.color_attachments[0] = &framebuffers[pass]->get_view();
@@ -445,8 +481,9 @@ const Vulkan::ImageView &CrtRoyalePipeline::run_offscreen(Vulkan::CommandBuffer 
         impl_->run_pass(cmd, pass, source, source_size, frame_count);
     }
 
-    if (kDebugVisualizePass >= 0 && kDebugVisualizePass < kOffscreenPassCount) {
-        return impl_->framebuffers[kDebugVisualizePass]->get_view();
+    const int debug_pass = debug_visualize_pass();
+    if (debug_pass >= 0 && debug_pass < kOffscreenPassCount) {
+        return impl_->framebuffers[debug_pass]->get_view();
     }
     return impl_->framebuffers[kLastOffscreenPass]->get_view();
 }
