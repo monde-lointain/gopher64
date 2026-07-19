@@ -1,0 +1,36 @@
+name: CRT-shaders
+
+# Guards the committed, generated crt-royale artifacts (the SPIR-V header and the
+# embedded-texture header) against drift: if someone edits a pass shader or a
+# source PNG without re-running the generators, the regenerated output differs
+# from what is checked in and this job fails. The runner is pinned (ubuntu-24.04)
+# so glslc's version -- and therefore the emitted SPIR-V bytes -- stays stable.
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+  merge_group:
+
+permissions:
+  contents: read
+
+jobs:
+  crt-artifacts:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install glslc and Pillow
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y glslc python3-pil
+      - name: Regenerate crt-royale SPIR-V and textures
+        run: |
+          (cd data/shader/crt-royale && ./output.sh)
+          python3 data/shader/crt-royale/embed_textures.py
+      - name: Fail if committed artifacts are stale
+        run: |
+          git diff --exit-code -- \
+            parallel-rdp/spirv_crt_royale.hpp \
+            parallel-rdp/crt_royale_textures.hpp

@@ -61,6 +61,7 @@ fn main() {
         .file("parallel-rdp/parallel-rdp-standalone/util/environment.cpp")
         .file("parallel-rdp/parallel-rdp-standalone/util/thread_name.cpp")
         .file("parallel-rdp/interface.cpp")
+        .file("parallel-rdp/crt_royale.cpp")
         .file("parallel-rdp/wsi_platform.cpp")
         .include("parallel-rdp/parallel-rdp-standalone/parallel-rdp")
         .include("parallel-rdp/parallel-rdp-standalone/volk")

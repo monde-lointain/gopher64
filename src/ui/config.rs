@@ -189,7 +189,11 @@ impl Config {
                 fullscreen: false,
                 widescreen: false,
                 vsync: true,
-                crt: false,
+                // Default the crt-royale CRT shader on for desktop, but off on
+                // Android (too heavy for typical mobile GPUs) and on macOS until
+                // the 11-pass chain is validated on MoltenVK. Only affects fresh
+                // configs; existing configs keep their stored value.
+                crt: !cfg!(any(target_os = "android", target_os = "macos")),
             },
             emulation: Emulation {
                 overclock: false,
